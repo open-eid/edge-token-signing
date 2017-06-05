@@ -17,6 +17,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -86,13 +87,33 @@ namespace HostBackend
                 case "CERT":
                     try
                     {
+                        String info = "By selecting a certificate I accept that my name and personal ID code will be sent to service provider.";
+                        switch (request.GetNamedString("lang").ToString())
+                        {
+                            case "et":
+                            case "est": info = "Sertifikaadi valikuga nõustun oma nime ja isikukoodi edastamisega teenusepakkujale."; break;
+                            case "lt":
+                            case "lit": info = "Pasirinkdama(s) sertifikatą, aš sutinku, kad mano vardas, pavardė ir asmens kodas būtų perduoti e. paslaugos teikėjui."; break;
+                            case "lv":
+                            case "lat": info = "Izvēloties sertifikātu, es apstiprinu, ka mans vārds un personas kods tiks nosūtīts pakalpojuma sniedzējam."; break;
+                            case "ru":
+                            case "rus": info = "Выбирая сертификат, я соглащаюсь с тем, что мое имя и личный код будут переданы представителю услуг."; break;
+                            default: break;
+                        }
                         X509Store store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
                         store.Open(OpenFlags.ReadOnly);
                         if (store.Certificates.Count > 0)
                         {
+                            bool forSigning = request.GetNamedString("filter", "SIGN").ToString() != "AUTH";
+                            X509Certificate2Collection list = new X509Certificate2Collection();
+                            foreach(X509Certificate2 x in store.Certificates.Find(X509FindType.FindByTimeValid, DateTime.Now, false))
+                            {
+                                List<X509KeyUsageExtension> extensions = x.Extensions.OfType<X509KeyUsageExtension>().ToList();
+                                if (extensions.Any() && ((extensions[0].KeyUsages & X509KeyUsageFlags.NonRepudiation) > 0) == forSigning)
+                                    list.Add(x);
+                            }
                             X509Certificate2Collection certs = X509Certificate2UI.SelectFromCollection(
-                                store.Certificates.Find(X509FindType.FindByKeyUsage, X509KeyUsageFlags.NonRepudiation, false),
-                                "Title", "MSG", X509SelectionFlag.SingleSelection);
+                                list, "", info, X509SelectionFlag.SingleSelection);
                             if (certs.Count > 0)
                             {
                                 response.Add("cert", JsonValue.CreateStringValue(ByteToString(certs[0].Export(X509ContentType.Cert), false)));
@@ -119,6 +140,12 @@ namespace HostBackend
                 case "SIGN":
                     try
                     {
+                        String info = request.GetNamedString("info", "");
+                        if (info.Length > 500)
+                            throw new ArgumentException("Info parameter longer than 500 chars");
+                        if (info.Length > 0 && MessageBox.Show(info, "", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.No)
+                            throw new Exception("User cancelled");
+
                         X509Certificate2 cert = new X509Certificate2(StringToByte(request.GetNamedString("cert")));
                         if (cert == null)
                             throw new ArgumentException("Failed to parse certificate");

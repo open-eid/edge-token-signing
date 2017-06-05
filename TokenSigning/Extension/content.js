@@ -118,12 +118,12 @@ function TokenSigning() { \n\
         }); \n\
     } \n\
     this.getCertificate = function(options) { \n\
-        var msg = {type: "CERT", lang: options.lang}; \n\
+        var msg = {type: "CERT", lang: options.lang, filter: options.filter}; \n\
         console.log("getCertificate()"); \n\
         return messagePromise(msg); \n\
     }; \n\
     this.sign = function(cert, hash, options) { \n\
-        var msg = {type: "SIGN", cert: cert.hex, hash: hash.hex, hashtype: hash.type, lang: options.lang}; \n\
+        var msg = {type: "SIGN", cert: cert.hex, hash: hash.hex, hashtype: hash.type, lang: options.lang, info: options.info}; \n\
         console.log("sign()"); \n\
         return messagePromise(msg); \n\
     }; \n\
