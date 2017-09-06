@@ -1,6 +1,6 @@
 {
     "name": "Token signing",
-    "version": "0.0.23",
+    "version": "0.0.27",
     "minimum_edge_version": "39.15002.1001.0",
     "manifest_version": 2,
     "description": "Use your eID smart card on the web",
@@ -11,6 +11,7 @@
     },
     "content_scripts": [{
         "matches": ["*://*/*", "file:///*"],
+        "exclude_matches": ["*://*.overdrive.com/*"],
         "js": ["content.js"],
         "run_at": "document_end",
         "all_frames": true
