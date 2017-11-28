@@ -154,11 +154,28 @@ namespace HostBackend
                         X509Certificate2Collection certs = store.Certificates.Find(X509FindType.FindByThumbprint, cert.Thumbprint, false);
                         if (certs.Count == 0)
                             throw new ArgumentException("Failed to find certificate");
-                        RSACryptoServiceProvider rsa = (RSACryptoServiceProvider)certs[0].PrivateKey;
-                        if (rsa == null)
-                            throw new ArgumentException("Failed to find certificate token");
-                        byte[] signature = rsa.SignHash(StringToByte(request.GetNamedString("hash")),
-                            CryptoConfig.MapNameToOID(request.GetNamedString("hashtype").Replace("-", "")));
+                        byte[] signature = null;
+                        if (certs[0].PublicKey.Oid.Value.Equals("1.2.840.10045.2.1"))
+                        {
+                            using (ECDsa ecdsa = certs[0].GetECDsaPrivateKey())
+                            {
+                                if (ecdsa == null)
+                                    throw new ArgumentException("Failed to find certificate token");
+                                signature = ecdsa.SignHash(StringToByte(request.GetNamedString("hash")));
+                            }
+                        }
+                        else
+                        {
+                            using (RSACryptoServiceProvider rsa = (RSACryptoServiceProvider)certs[0].PrivateKey)
+                            {
+                                if (rsa == null)
+                                    throw new ArgumentException("Failed to find certificate token");
+                                signature = rsa.SignHash(StringToByte(request.GetNamedString("hash")),
+                                        CryptoConfig.MapNameToOID(request.GetNamedString("hashtype").Replace("-", "")));
+                            }
+                        }
+                        if (signature == null)
+                            throw new Exception("Failed to sign hash");
                         response.Add("signature", JsonValue.CreateStringValue(ByteToString(signature, false)));
                     }
                     catch (Exception e)
