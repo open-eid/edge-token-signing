@@ -109,8 +109,24 @@ namespace HostBackend
                             foreach(X509Certificate2 x in store.Certificates.Find(X509FindType.FindByTimeValid, DateTime.Now, false))
                             {
                                 List<X509KeyUsageExtension> extensions = x.Extensions.OfType<X509KeyUsageExtension>().ToList();
-                                if (extensions.Any() && ((extensions[0].KeyUsages & X509KeyUsageFlags.NonRepudiation) > 0) == forSigning)
-                                    list.Add(x);
+                                if (!extensions.Any() || ((extensions[0].KeyUsages & X509KeyUsageFlags.NonRepudiation) > 0) != forSigning)
+                                    continue;
+                                if (x.PublicKey.Oid.Value.Equals("1.2.840.10045.2.1"))
+                                {
+                                    using (ECDsa ecdsa = x.GetECDsaPrivateKey())
+                                    {
+                                        if (ecdsa != null)
+                                            list.Add(x);
+                                    }
+                                }
+                                else
+                                {
+                                    using (RSACryptoServiceProvider rsa = (RSACryptoServiceProvider)x.PrivateKey)
+                                    {
+                                        if (rsa != null)
+                                            list.Add(x);
+                                    }
+                                }
                             }
                             X509Certificate2Collection certs = X509Certificate2UI.SelectFromCollection(
                                 list, "", info, X509SelectionFlag.SingleSelection);
