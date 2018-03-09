@@ -19,11 +19,13 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using Windows.ApplicationModel;
 using Windows.ApplicationModel.AppService;
 using Windows.Data.Json;
 using Windows.Foundation.Collections;
@@ -32,6 +34,27 @@ namespace HostBackend
 {
     class Program
     {
+        enum KEY_SPEC : uint
+        {
+            AT_KEYEXCHANGE = 1,
+            AT_SIGNATURE = 2,
+            CERT_NCRYPT_KEY_SPEC = 0xFFFFFFFF,
+        }
+
+        static private readonly uint CRYPT_ACQUIRE_COMPARE_KEY_FLAG = 0x00000004;
+        static private readonly uint CRYPT_ACQUIRE_SILENT_FLAG = 0x00000040;
+        static private readonly uint CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG = 0x00020000;
+
+        [DllImport("Crypt32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        private static extern bool CryptAcquireCertificatePrivateKey(
+            IntPtr pCertContext, uint dwFlags, IntPtr pvParameters, out IntPtr phKey, ref KEY_SPEC pdwKeySpec, ref bool pfFree);
+
+        [DllImport("Crypt32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        private static extern bool CryptReleaseContext(IntPtr hProv, uint dwFlags);
+   
+        [DllImport("ncrypt.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern int NCryptFreeObject(IntPtr hObject);
+
         static AppServiceConnection connection = null;
 
         [STAThread]
@@ -81,7 +104,9 @@ namespace HostBackend
             switch (request.GetNamedString("type"))
             {
                 case "VERSION":
-                    response.Add("version", JsonValue.CreateStringValue("1.0.0.0"));
+                    PackageVersion version = Package.Current.Id.Version;
+                    response.Add("version", JsonValue.CreateStringValue(
+                        string.Format("{0}.{1}.{2}.{3}", version.Major, version.Minor, version.Build, version.Revision)));
                     args.Request.SendResponseAsync(new ValueSet { ["message"] = response.ToString() }).Completed += delegate { };
                     break;
                 case "CERT":
@@ -111,22 +136,26 @@ namespace HostBackend
                                 List<X509KeyUsageExtension> extensions = x.Extensions.OfType<X509KeyUsageExtension>().ToList();
                                 if (!extensions.Any() || ((extensions[0].KeyUsages & X509KeyUsageFlags.NonRepudiation) > 0) != forSigning)
                                     continue;
-                                if (x.PublicKey.Oid.Value.Equals("1.2.840.10045.2.1"))
+                                IntPtr pKey;
+                                KEY_SPEC dwSpec = 0;
+                                bool keyFree = false;
+                                CryptAcquireCertificatePrivateKey(x.Handle, CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_COMPARE_KEY_FLAG | CRYPT_ACQUIRE_SILENT_FLAG,
+                                    IntPtr.Zero, out pKey, ref dwSpec, ref keyFree);
+                                if (pKey == IntPtr.Zero)
+                                    continue;
+                                switch (dwSpec)
                                 {
-                                    using (ECDsa ecdsa = x.GetECDsaPrivateKey())
-                                    {
-                                        if (ecdsa != null)
-                                            list.Add(x);
-                                    }
+                                    case KEY_SPEC.AT_KEYEXCHANGE:
+                                    case KEY_SPEC.AT_SIGNATURE:
+                                        if (keyFree)
+                                            CryptReleaseContext(pKey, 0);
+                                        break;
+                                    case KEY_SPEC.CERT_NCRYPT_KEY_SPEC:
+                                        if (keyFree)
+                                            NCryptFreeObject(pKey);
+                                        break;
                                 }
-                                else
-                                {
-                                    using (RSACryptoServiceProvider rsa = (RSACryptoServiceProvider)x.PrivateKey)
-                                    {
-                                        if (rsa != null)
-                                            list.Add(x);
-                                    }
-                                }
+                                list.Add(x);
                             }
                             X509Certificate2Collection certs = X509Certificate2UI.SelectFromCollection(
                                 list, "", info, X509SelectionFlag.SingleSelection);
