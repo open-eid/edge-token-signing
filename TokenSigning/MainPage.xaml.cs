@@ -9,7 +9,7 @@ namespace TokenSigning
     {
         public MainPage()
         {
-            this.InitializeComponent();
+            InitializeComponent();
         }
     }
 }

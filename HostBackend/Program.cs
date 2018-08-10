@@ -45,15 +45,31 @@ namespace HostBackend
         static private readonly uint CRYPT_ACQUIRE_SILENT_FLAG = 0x00000040;
         static private readonly uint CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG = 0x00020000;
 
+        static private readonly uint PP_IMPTYPE = 0x3;
+
+        static private readonly uint CRYPT_IMPL_HARDWARE = 0x1;
+        static private readonly uint CRYPT_IMPL_REMOVABLE = 0x8;
+
+        static private readonly string NCRYPT_IMPL_TYPE_PROPERTY = "Impl Type";
+        static private readonly string NCRYPT_PROVIDER_HANDLE_PROPERTY = "Provider Handle";
+
         [DllImport("Crypt32.dll", SetLastError = true, CharSet = CharSet.Auto)]
         private static extern bool CryptAcquireCertificatePrivateKey(
             IntPtr pCertContext, uint dwFlags, IntPtr pvParameters, out IntPtr phKey, ref KEY_SPEC pdwKeySpec, ref bool pfFree);
 
-        [DllImport("Crypt32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        [DllImport("Advapi32.dll", SetLastError = true, CharSet = CharSet.Auto)]
         private static extern bool CryptReleaseContext(IntPtr hProv, uint dwFlags);
-   
-        [DllImport("ncrypt.dll", CharSet = CharSet.Auto, SetLastError = true)]
+
+        [DllImport("Advapi32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        private static extern bool CryptGetProvParam(
+            IntPtr hProv, uint dwParam, [Out, MarshalAs(UnmanagedType.LPArray)] byte[] pbOutput, ref uint pdwDataLen, uint dwFlags);
+
+        [DllImport("ncrypt.dll", SetLastError = true, CharSet = CharSet.Auto)]
         public static extern int NCryptFreeObject(IntPtr hObject);
+
+        [DllImport("ncrypt.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        public static extern int NCryptGetProperty(
+            IntPtr hObject, String pszProperty, [Out, MarshalAs(UnmanagedType.LPArray)] byte[] pbOutput, uint cbOutput, ref uint pcbResult, uint dwFlags);
 
         static AppServiceConnection connection = null;
 
@@ -67,14 +83,18 @@ namespace HostBackend
 
         static async void ThreadProc()
         {
-            connection = new AppServiceConnection();
-            connection.AppServiceName = "ee.ria.esteid";
-            connection.PackageFamilyName = Windows.ApplicationModel.Package.Current.Id.FamilyName;
+            connection = new AppServiceConnection
+            {
+                AppServiceName = "ee.ria.esteid",
+                PackageFamilyName = Package.Current.Id.FamilyName
+            };
             connection.RequestReceived += RequestReceived;
-            connection.ServiceClosed += ServiceClosed;
+            connection.ServiceClosed += (AppServiceConnection sender, AppServiceClosedEventArgs args) =>
+            {
+                Application.Exit();
+            };
 
-            AppServiceConnectionStatus status = await connection.OpenAsync();
-            switch (status)
+            switch (await connection.OpenAsync())
             {
                 case AppServiceConnectionStatus.Success:
                     break;
@@ -86,19 +106,16 @@ namespace HostBackend
             }
         }
 
-        private static void ServiceClosed(AppServiceConnection sender, AppServiceClosedEventArgs args)
-        {
-            Application.Exit();
-        }
-
         private static void RequestReceived(AppServiceConnection sender, AppServiceRequestReceivedEventArgs args)
         {
             string key = args.Request.Message.First().Key;
             string value = args.Request.Message.First().Value.ToString();
             JsonObject request = JsonValue.Parse(value).GetObject();
-            JsonObject response = new JsonObject();
-            response.Add("api", JsonValue.CreateNumberValue(1));
-            response.Add("result", JsonValue.CreateStringValue("ok"));
+            JsonObject response = new JsonObject
+            {
+                { "api", JsonValue.CreateNumberValue(1) },
+                { "result", JsonValue.CreateStringValue("ok") }
+            };
             if (request.ContainsKey("nonce"))
                 response.Add("nonce", request.GetNamedValue("nonce"));
             switch (request.GetNamedString("type"))
@@ -125,38 +142,20 @@ namespace HostBackend
                             case "rus": info = "Выбирая сертификат, я соглащаюсь с тем, что мое имя и личный код будут переданы представителю услуг."; break;
                             default: break;
                         }
-                        X509Store store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
-                        store.Open(OpenFlags.ReadOnly);
-                        if (store.Certificates.Count > 0)
+                        X509Certificate2Collection list = new X509Certificate2Collection();
+                        using (X509Store store = new X509Store(StoreName.My, StoreLocation.CurrentUser))
                         {
+                            store.Open(OpenFlags.ReadOnly);
                             bool forSigning = request.GetNamedString("filter", "SIGN").ToString() != "AUTH";
-                            X509Certificate2Collection list = new X509Certificate2Collection();
-                            foreach(X509Certificate2 x in store.Certificates.Find(X509FindType.FindByTimeValid, DateTime.Now, false))
+                            foreach (X509Certificate2 x in store.Certificates.Find(X509FindType.FindByTimeValid, DateTime.Now, false))
                             {
                                 List<X509KeyUsageExtension> extensions = x.Extensions.OfType<X509KeyUsageExtension>().ToList();
-                                if (!extensions.Any() || ((extensions[0].KeyUsages & X509KeyUsageFlags.NonRepudiation) > 0) != forSigning)
-                                    continue;
-                                IntPtr pKey;
-                                KEY_SPEC dwSpec = 0;
-                                bool keyFree = false;
-                                CryptAcquireCertificatePrivateKey(x.Handle, CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_COMPARE_KEY_FLAG | CRYPT_ACQUIRE_SILENT_FLAG,
-                                    IntPtr.Zero, out pKey, ref dwSpec, ref keyFree);
-                                if (pKey == IntPtr.Zero)
-                                    continue;
-                                switch (dwSpec)
-                                {
-                                    case KEY_SPEC.AT_KEYEXCHANGE:
-                                    case KEY_SPEC.AT_SIGNATURE:
-                                        if (keyFree)
-                                            CryptReleaseContext(pKey, 0);
-                                        break;
-                                    case KEY_SPEC.CERT_NCRYPT_KEY_SPEC:
-                                        if (keyFree)
-                                            NCryptFreeObject(pKey);
-                                        break;
-                                }
-                                list.Add(x);
+                                if (extensions.Any() && ((extensions[0].KeyUsages & X509KeyUsageFlags.NonRepudiation) > 0) == forSigning && HasHWToken(x))
+                                    list.Add(x);
                             }
+                        }
+                        if (list.Count > 0)
+                        {
                             X509Certificate2Collection certs = X509Certificate2UI.SelectFromCollection(
                                 list, "", info, X509SelectionFlag.SingleSelection);
                             if (certs.Count > 0)
@@ -239,6 +238,41 @@ namespace HostBackend
                     Application.Exit();
                     break;
             }
+        }
+
+        private static bool HasHWToken(X509Certificate2 cert)
+        {
+            KEY_SPEC dwSpec = 0;
+            bool keyFree = false;
+            CryptAcquireCertificatePrivateKey(cert.Handle, CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_COMPARE_KEY_FLAG | CRYPT_ACQUIRE_SILENT_FLAG,
+                IntPtr.Zero, out IntPtr key, ref dwSpec, ref keyFree);
+            if (key == IntPtr.Zero)
+                return false;
+            uint type = 0, typesize = 4, provsize = 4;
+            byte[] tmp = new byte[4];
+            switch (dwSpec)
+            {
+                case KEY_SPEC.AT_KEYEXCHANGE:
+                case KEY_SPEC.AT_SIGNATURE:
+                    CryptGetProvParam(key, PP_IMPTYPE, tmp, ref typesize, 0);
+                    type = BitConverter.ToUInt32(tmp, 0);
+                    if (keyFree)
+                        CryptReleaseContext(key, 0);
+                    break;
+                case KEY_SPEC.CERT_NCRYPT_KEY_SPEC:
+                    NCryptGetProperty(key, NCRYPT_PROVIDER_HANDLE_PROPERTY, tmp, provsize, ref provsize, 0);
+                    IntPtr prov = new IntPtr(BitConverter.ToInt32(tmp, 0));
+                    if (prov != IntPtr.Zero)
+                    {
+                        NCryptGetProperty(prov, NCRYPT_IMPL_TYPE_PROPERTY, tmp, typesize, ref typesize, 0);
+                        type = BitConverter.ToUInt32(tmp, 0);
+                        NCryptFreeObject(prov);
+                    }
+                    if (keyFree)
+                        NCryptFreeObject(key);
+                    break;
+            }
+            return (type & (CRYPT_IMPL_HARDWARE | CRYPT_IMPL_REMOVABLE)) > 0;
         }
 
         private static string ByteToString(byte[] bytes, bool upperCase)
