@@ -17,12 +17,10 @@
  */
 
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
-using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using Windows.ApplicationModel;
@@ -32,50 +30,32 @@ using Windows.Foundation.Collections;
 
 namespace HostBackend
 {
-    class Program
+    static class Program
     {
-        enum KEY_SPEC : uint
-        {
-            AT_KEYEXCHANGE = 1,
-            AT_SIGNATURE = 2,
-            CERT_NCRYPT_KEY_SPEC = 0xFFFFFFFF,
-        }
-
-        static private readonly uint CRYPT_ACQUIRE_COMPARE_KEY_FLAG = 0x00000004;
-        static private readonly uint CRYPT_ACQUIRE_SILENT_FLAG = 0x00000040;
-        static private readonly uint CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG = 0x00020000;
-
-        static private readonly uint PP_IMPTYPE = 0x3;
-
-        static private readonly uint CRYPT_IMPL_HARDWARE = 0x1;
-        static private readonly uint CRYPT_IMPL_REMOVABLE = 0x8;
-
-        static private readonly string NCRYPT_IMPL_TYPE_PROPERTY = "Impl Type";
-        static private readonly string NCRYPT_PROVIDER_HANDLE_PROPERTY = "Provider Handle";
-
-        [DllImport("Crypt32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        [DllImport("Crypt32.dll", CharSet = CharSet.Unicode)]
         private static extern bool CryptAcquireCertificatePrivateKey(
-            IntPtr pCertContext, uint dwFlags, IntPtr pvParameters, out IntPtr phKey, ref KEY_SPEC pdwKeySpec, ref bool pfFree);
+            IntPtr pCertContext, uint dwFlags, IntPtr pvParameters, out IntPtr phKey, out uint pdwKeySpec, out bool pfFree);
 
-        [DllImport("Advapi32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        [DllImport("Advapi32.dll", CharSet = CharSet.Unicode)]
         private static extern bool CryptReleaseContext(IntPtr hProv, uint dwFlags);
 
-        [DllImport("Advapi32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        [DllImport("Advapi32.dll", CharSet = CharSet.Unicode)]
         private static extern bool CryptGetProvParam(
-            IntPtr hProv, uint dwParam, [Out, MarshalAs(UnmanagedType.LPArray)] byte[] pbOutput, ref uint pdwDataLen, uint dwFlags);
+            IntPtr hProv, uint dwParam, out uint pbOutput, ref uint pdwDataLen, uint dwFlags);
 
-        [DllImport("ncrypt.dll", SetLastError = true, CharSet = CharSet.Auto)]
-        public static extern int NCryptFreeObject(IntPtr hObject);
+        [DllImport("ncrypt.dll", CharSet = CharSet.Unicode)]
+        static extern int NCryptFreeObject(IntPtr hObject);
 
-        [DllImport("ncrypt.dll", SetLastError = true, CharSet = CharSet.Auto)]
-        public static extern int NCryptGetProperty(
-            IntPtr hObject, String pszProperty, [Out, MarshalAs(UnmanagedType.LPArray)] byte[] pbOutput, uint cbOutput, ref uint pcbResult, uint dwFlags);
+        [DllImport("ncrypt.dll", CharSet = CharSet.Unicode)]
+        static extern int NCryptGetProperty(
+            IntPtr hObject, String pszProperty, out IntPtr pbOutput, uint cbOutput, out uint pcbResult, uint dwFlags);
 
-        static AppServiceConnection connection = null;
+        static AppServiceConnection connection;
 
         [STAThread]
         static void Main(string[] args)
         {
+            Application.EnableVisualStyles();
             Thread appServiceThread = new Thread(new ThreadStart(ThreadProc));
             appServiceThread.Start();
             Application.Run();
@@ -89,48 +69,38 @@ namespace HostBackend
                 PackageFamilyName = Package.Current.Id.FamilyName
             };
             connection.RequestReceived += RequestReceived;
-            connection.ServiceClosed += (AppServiceConnection sender, AppServiceClosedEventArgs args) =>
+            connection.ServiceClosed += delegate
             {
                 Application.Exit();
             };
 
-            switch (await connection.OpenAsync())
-            {
-                case AppServiceConnectionStatus.Success:
-                    break;
-                case AppServiceConnectionStatus.AppNotInstalled:
-                case AppServiceConnectionStatus.AppUnavailable:
-                case AppServiceConnectionStatus.AppServiceUnavailable:
-                case AppServiceConnectionStatus.Unknown:
-                    return;
-            }
+            if ((await connection.OpenAsync()) != AppServiceConnectionStatus.Success)
+                Application.Exit();
         }
 
-        private static void RequestReceived(AppServiceConnection sender, AppServiceRequestReceivedEventArgs args)
+        private static async void RequestReceived(AppServiceConnection sender, AppServiceRequestReceivedEventArgs args)
         {
-            string key = args.Request.Message.First().Key;
             string value = args.Request.Message.First().Value.ToString();
             JsonObject request = JsonValue.Parse(value).GetObject();
             JsonObject response = new JsonObject
             {
-                { "api", JsonValue.CreateNumberValue(1) },
-                { "result", JsonValue.CreateStringValue("ok") }
+                ["api"] = JsonValue.CreateNumberValue(1),
+                ["result"] = JsonValue.CreateStringValue("ok")
             };
-            if (request.ContainsKey("nonce"))
-                response.Add("nonce", request.GetNamedValue("nonce"));
+            if (request.TryGetValue("nonce", out var nonce))
+                response.Add("nonce", nonce);
             switch (request.GetNamedString("type"))
             {
                 case "VERSION":
                     PackageVersion version = Package.Current.Id.Version;
                     response.Add("version", JsonValue.CreateStringValue(
                         string.Format("{0}.{1}.{2}.{3}", version.Major, version.Minor, version.Build, version.Revision)));
-                    args.Request.SendResponseAsync(new ValueSet { ["message"] = response.ToString() }).Completed += delegate { };
                     break;
                 case "CERT":
                     try
                     {
                         String info = "By selecting a certificate I accept that my name and personal ID code will be sent to service provider.";
-                        switch (request.GetNamedString("lang").ToString())
+                        switch (request.GetNamedString("lang"))
                         {
                             case "et":
                             case "est": info = "Sertifikaadi valikuga nõustun oma nime ja isikukoodi edastamisega teenusepakkujale."; break;
@@ -146,13 +116,14 @@ namespace HostBackend
                         using (X509Store store = new X509Store(StoreName.My, StoreLocation.CurrentUser))
                         {
                             store.Open(OpenFlags.ReadOnly);
-                            bool forSigning = request.GetNamedString("filter", "SIGN").ToString() != "AUTH";
-                            foreach (X509Certificate2 x in store.Certificates.Find(X509FindType.FindByTimeValid, DateTime.Now, false))
-                            {
-                                List<X509KeyUsageExtension> extensions = x.Extensions.OfType<X509KeyUsageExtension>().ToList();
-                                if (extensions.Any() && ((extensions[0].KeyUsages & X509KeyUsageFlags.NonRepudiation) > 0) == forSigning && HasHWToken(x))
-                                    list.Add(x);
-                            }
+                            bool forSigning = request.GetNamedString("filter", "SIGN") != "AUTH";
+                            foreach (X509Certificate2 x in store.Certificates.Find(X509FindType.FindByTimeValid, DateTime.UtcNow, false))
+                                foreach (var ext in x.Extensions)
+                                    if (ext is X509KeyUsageExtension keyExt && ((keyExt.KeyUsages & X509KeyUsageFlags.NonRepudiation) > 0) == forSigning && HasHWToken(x))
+                                    {
+                                        list.Add(x);
+                                        break;
+                                    }
                         }
                         if (list.Count > 0)
                         {
@@ -160,7 +131,7 @@ namespace HostBackend
                                 list, "", info, X509SelectionFlag.SingleSelection);
                             if (certs.Count > 0)
                             {
-                                response.Add("cert", JsonValue.CreateStringValue(ByteToString(certs[0].Export(X509ContentType.Cert), false)));
+                                response.Add("cert", JsonValue.CreateStringValue(ByteToString(certs[0].Export(X509ContentType.Cert))));
                             }
                             else
                             {
@@ -179,7 +150,6 @@ namespace HostBackend
                         response["result"] = JsonValue.CreateStringValue("technical_error");
                         response.Add("message", JsonValue.CreateStringValue(e.Message));
                     }
-                    args.Request.SendResponseAsync(new ValueSet { ["message"] = response.ToString() }).Completed += delegate { };
                     break;
                 case "SIGN":
                     try
@@ -190,37 +160,39 @@ namespace HostBackend
                         if (info.Length > 0 && MessageBox.Show(info, "", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.No)
                             throw new Exception("User cancelled");
 
-                        X509Certificate2 cert = new X509Certificate2(StringToByte(request.GetNamedString("cert")));
-                        if (cert == null)
-                            throw new ArgumentException("Failed to parse certificate");
-                        X509Store store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
-                        store.Open(OpenFlags.ReadOnly);
-                        X509Certificate2Collection certs = store.Certificates.Find(X509FindType.FindByThumbprint, cert.Thumbprint, false);
-                        if (certs.Count == 0)
-                            throw new ArgumentException("Failed to find certificate");
-                        byte[] signature = null;
-                        if (certs[0].PublicKey.Oid.Value.Equals("1.2.840.10045.2.1"))
+                        string thumbprint;
+                        using (X509Certificate2 cert = new X509Certificate2(StringToByte(request.GetNamedString("cert"))))
+                            thumbprint = cert.Thumbprint;
+                        byte[] signature;
+                        using (X509Store store = new X509Store(StoreName.My, StoreLocation.CurrentUser))
                         {
-                            using (ECDsa ecdsa = certs[0].GetECDsaPrivateKey())
+                            store.Open(OpenFlags.ReadOnly);
+                            X509Certificate2Collection certs = store.Certificates.Find(X509FindType.FindByThumbprint, thumbprint, false);
+                            if (certs.Count == 0)
+                                throw new ArgumentException("Failed to find certificate");
+                            if (certs[0].PublicKey.Oid.Value.Equals("1.2.840.10045.2.1"))
                             {
-                                if (ecdsa == null)
-                                    throw new ArgumentException("Failed to find certificate token");
-                                signature = ecdsa.SignHash(StringToByte(request.GetNamedString("hash")));
+                                using (ECDsa ecdsa = certs[0].GetECDsaPrivateKey())
+                                {
+                                    if (ecdsa == null)
+                                        throw new ArgumentException("Failed to find certificate token");
+                                    signature = ecdsa.SignHash(StringToByte(request.GetNamedString("hash")));
+                                }
                             }
-                        }
-                        else
-                        {
-                            using (RSACryptoServiceProvider rsa = (RSACryptoServiceProvider)certs[0].PrivateKey)
+                            else
                             {
-                                if (rsa == null)
-                                    throw new ArgumentException("Failed to find certificate token");
-                                signature = rsa.SignHash(StringToByte(request.GetNamedString("hash")),
+                                using (RSACryptoServiceProvider rsa = (RSACryptoServiceProvider)certs[0].PrivateKey)
+                                {
+                                    if (rsa == null)
+                                        throw new ArgumentException("Failed to find certificate token");
+                                    signature = rsa.SignHash(StringToByte(request.GetNamedString("hash")),
                                         CryptoConfig.MapNameToOID(request.GetNamedString("hashtype").Replace("-", "")));
+                                }
                             }
                         }
                         if (signature == null)
                             throw new Exception("Failed to sign hash");
-                        response.Add("signature", JsonValue.CreateStringValue(ByteToString(signature, false)));
+                        response.Add("signature", JsonValue.CreateStringValue(ByteToString(signature)));
                     }
                     catch (Exception e)
                     {
@@ -232,40 +204,49 @@ namespace HostBackend
                             response["result"] = JsonValue.CreateStringValue("technical_error");
                         response.Add("message", JsonValue.CreateStringValue(e.Message));
                     }
-                    args.Request.SendResponseAsync(new ValueSet { ["message"] = response.ToString() }).Completed += delegate { };
                     break;
                 default:
                     Application.Exit();
-                    break;
+                    return;
             }
+            await args.Request.SendResponseAsync(new ValueSet { ["message"] = response.ToString() });
         }
 
         private static bool HasHWToken(X509Certificate2 cert)
         {
-            KEY_SPEC dwSpec = 0;
-            bool keyFree = false;
+            const uint CERT_NCRYPT_KEY_SPEC = 0xFFFFFFFF;
+
+            const uint CRYPT_ACQUIRE_COMPARE_KEY_FLAG = 0x00000004;
+            const uint CRYPT_ACQUIRE_SILENT_FLAG = 0x00000040;
+            const uint CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG = 0x00020000;
+
+            const uint PP_IMPTYPE = 0x3;
+
+            const uint CRYPT_IMPL_HARDWARE = 0x1;
+            const uint CRYPT_IMPL_REMOVABLE = 0x8;
+
+            const string NCRYPT_IMPL_TYPE_PROPERTY = "Impl Type";
+            const string NCRYPT_PROVIDER_HANDLE_PROPERTY = "Provider Handle";
+
             CryptAcquireCertificatePrivateKey(cert.Handle, CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_COMPARE_KEY_FLAG | CRYPT_ACQUIRE_SILENT_FLAG,
-                IntPtr.Zero, out IntPtr key, ref dwSpec, ref keyFree);
+                IntPtr.Zero, out var key, out var dwSpec, out var keyFree);
             if (key == IntPtr.Zero)
                 return false;
-            uint type = 0, typesize = 4, provsize = 4;
-            byte[] tmp = new byte[4];
+            uint type = 0;
             switch (dwSpec)
             {
-                case KEY_SPEC.AT_KEYEXCHANGE:
-                case KEY_SPEC.AT_SIGNATURE:
-                    CryptGetProvParam(key, PP_IMPTYPE, tmp, ref typesize, 0);
-                    type = BitConverter.ToUInt32(tmp, 0);
+                default:
+                    uint typesize = sizeof(uint);
+                    CryptGetProvParam(key, PP_IMPTYPE, out type, ref typesize, 0);
                     if (keyFree)
                         CryptReleaseContext(key, 0);
                     break;
-                case KEY_SPEC.CERT_NCRYPT_KEY_SPEC:
-                    NCryptGetProperty(key, NCRYPT_PROVIDER_HANDLE_PROPERTY, tmp, provsize, ref provsize, 0);
-                    IntPtr prov = new IntPtr(BitConverter.ToInt32(tmp, 0));
+                case CERT_NCRYPT_KEY_SPEC:
+                    NCryptGetProperty(key, NCRYPT_PROVIDER_HANDLE_PROPERTY, out var prov, (uint)IntPtr.Size, out _, 0);
                     if (prov != IntPtr.Zero)
                     {
-                        NCryptGetProperty(prov, NCRYPT_IMPL_TYPE_PROPERTY, tmp, typesize, ref typesize, 0);
-                        type = BitConverter.ToUInt32(tmp, 0);
+                        NCryptGetProperty(prov, NCRYPT_IMPL_TYPE_PROPERTY, out var tmp, sizeof(uint), out _, 0);
+                        type = (uint)(long)tmp;
                         NCryptFreeObject(prov);
                     }
                     if (keyFree)
@@ -275,20 +256,37 @@ namespace HostBackend
             return (type & (CRYPT_IMPL_HARDWARE | CRYPT_IMPL_REMOVABLE)) > 0;
         }
 
-        private static string ByteToString(byte[] bytes, bool upperCase)
+        private static string ByteToString(byte[] bytes)
         {
-            StringBuilder str = new StringBuilder(bytes.Length * 2);
+            var map = "0123456789abcdef";
+            var str = new char[bytes.Length * 2];
             for (int i = 0; i < bytes.Length; i++)
-                str.Append(bytes[i].ToString(upperCase ? "X2" : "x2"));
-            return str.ToString();
+            {
+                var b = bytes[i];
+                str[i * 2] = map[b >> 4];
+                str[i * 2 + 1] = map[b & 15];
+            }
+            return new string(str);
         }
 
         private static byte[] StringToByte(string hex)
         {
-            return Enumerable.Range(0, hex.Length)
-                             .Where(x => x % 2 == 0)
-                             .Select(x => Convert.ToByte(hex.Substring(x, 2), 16))
-                             .ToArray();
+            if (hex.Length % 2 != 0) throw new ArgumentException();
+            var bytes = new byte[hex.Length / 2];
+            for (int i = 0; i < bytes.Length; i++)
+            {
+                var v = (parse(hex[i * 2]) << 4) | parse(hex[i * 2 + 1]);
+                bytes[i] = checked((byte)v);
+            }
+            return bytes;
+
+            uint parse(uint c)
+            {
+                if ((c - '0') <= 9) return c - '0';
+                c |= 32; // lowercase
+                if ((c - 'a') <= 5) return c - 'a' + 10;
+                return ~0u;
+            }
         }
     }
 }
