@@ -109,7 +109,7 @@ namespace HostBackend
                             case "lv":
                             case "lat": info = "Izvēloties sertifikātu, es apstiprinu, ka mans vārds un personas kods tiks nosūtīts pakalpojuma sniedzējam."; break;
                             case "ru":
-                            case "rus": info = "Выбирая сертификат, я соглащаюсь с тем, что мое имя и личный код будут переданы представителю услуг."; break;
+                            case "rus": info = "Выбирая сертификат, я соглашаюсь с тем, что мое имя и личный код будут переданы представителю услуг."; break;
                             default: break;
                         }
                         X509Certificate2Collection list = new X509Certificate2Collection();
