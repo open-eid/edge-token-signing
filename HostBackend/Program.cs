@@ -99,6 +99,8 @@ namespace HostBackend
                 case "CERT":
                     try
                     {
+                        if (request.GetNamedString("filter", "SIGN") == "AUTH")
+                            throw new ArgumentException();
                         String info = "By selecting a certificate I accept that my name and personal ID code will be sent to service provider.";
                         switch (request.GetNamedString("lang"))
                         {
@@ -116,14 +118,12 @@ namespace HostBackend
                         using (X509Store store = new X509Store(StoreName.My, StoreLocation.CurrentUser))
                         {
                             store.Open(OpenFlags.ReadOnly);
-                            bool forSigning = request.GetNamedString("filter", "SIGN") != "AUTH";
                             foreach (X509Certificate2 x in store.Certificates.Find(X509FindType.FindByTimeValid, DateTime.UtcNow, false))
-                                foreach (var ext in x.Extensions)
-                                    if (ext is X509KeyUsageExtension keyExt && ((keyExt.KeyUsages & X509KeyUsageFlags.NonRepudiation) > 0) == forSigning && HasHWToken(x))
-                                    {
-                                        list.Add(x);
-                                        break;
-                                    }
+                                if (isNonRepudiation(x) && HasHWToken(x))
+                                {
+                                    list.Add(x);
+                                    break;
+                                }
                         }
                         if (list.Count > 0)
                         {
@@ -147,7 +147,10 @@ namespace HostBackend
                     }
                     catch (Exception e)
                     {
-                        response["result"] = JsonValue.CreateStringValue("technical_error");
+                        if (e is ArgumentException || e is ArgumentNullException)
+                            response["result"] = JsonValue.CreateStringValue("invalid_argument");
+                        else
+                            response["result"] = JsonValue.CreateStringValue("technical_error");
                         response.Add("message", JsonValue.CreateStringValue(e.Message));
                     }
                     break;
@@ -162,7 +165,11 @@ namespace HostBackend
 
                         string thumbprint;
                         using (X509Certificate2 cert = new X509Certificate2(StringToByte(request.GetNamedString("cert"))))
+                        {
+                            if (!isNonRepudiation(cert))
+                                throw new ArgumentException();
                             thumbprint = cert.Thumbprint;
+                        }
                         byte[] signature;
                         using (X509Store store = new X509Store(StoreName.My, StoreLocation.CurrentUser))
                         {
@@ -287,6 +294,14 @@ namespace HostBackend
                 if ((c - 'a') <= 5) return c - 'a' + 10;
                 return ~0u;
             }
+        }
+
+        private static bool isNonRepudiation(X509Certificate2 x509)
+        {
+            foreach (var ext in x509.Extensions)
+                if (ext is X509KeyUsageExtension keyExt && ((keyExt.KeyUsages & X509KeyUsageFlags.NonRepudiation) > 0))
+                    return true;
+            return false;
         }
     }
 }

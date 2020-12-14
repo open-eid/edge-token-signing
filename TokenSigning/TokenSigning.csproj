@@ -17,7 +17,7 @@
     <FileAlignment>512</FileAlignment>
     <ProjectTypeGuids>{A5A43C5B-DE2A-4C0C-9213-0A381AF9435A};{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}</ProjectTypeGuids>
     <PackageCertificateKeyFile>TokenSigning_TemporaryKey.pfx</PackageCertificateKeyFile>
-    <PackageCertificateThumbprint>3EEFB77B636EDEC6565E0304FA786E95715812F5</PackageCertificateThumbprint>
+    <PackageCertificateThumbprint>5EB6E15357AD1FADCEBC12A1EA69DAEBEA3C14C9</PackageCertificateThumbprint>
     <AppxAutoIncrementPackageRevision>True</AppxAutoIncrementPackageRevision>
     <AppxBundle>Always</AppxBundle>
     <AppxBundlePlatforms>x86</AppxBundlePlatforms>
